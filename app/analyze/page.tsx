@@ -20,7 +20,8 @@ export default function AnalyzePage() {
 
     (async () => {
       const meta = JSON.parse(sessionStorage.getItem("eim:files") || "[]");
-      if (!Array.isArray(meta) || meta.length < 3) {
+      const place = sessionStorage.getItem("eim:place") || "";
+      if (!Array.isArray(meta) || meta.length < 3 || place.length === 0) {
         router.replace("/upload");
         return;
       }
@@ -33,7 +34,7 @@ export default function AnalyzePage() {
       const res = await fetch("/api/interpret", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ files: meta })
+        body: JSON.stringify({ files: meta, place })
       });
       const data = await res.json();
       if (cancelled) return;

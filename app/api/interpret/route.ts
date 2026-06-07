@@ -8,16 +8,20 @@ import { generatePoster } from "@/lib/agents/generative-output-engine";
 import type { FullInterpretation } from "@/lib/types";
 
 /**
- * Orchestrator: the six agents run sequentially because each one
- * depends on the previous one's output. In production the place
- * detector and the mood analyzer can run in parallel — the rest
- * is strictly sequential.
+ * Orchestrator.
+ *
+ * Input:
+ *   { files: [{ name, size }], place: string }   // place = user-typed hint
+ *
+ * In produzione l'utente dichiara il luogo (campo "place"), e Place
+ * Detector lo conferma/arricchisce usando anche le foto.
  */
 export async function POST(req: Request) {
-  const body = (await req.json()) as { files: Array<{ name: string; size: number }> };
+  const body = (await req.json()) as { files?: Array<{ name: string; size: number }>; place?: string };
   const names = (body.files ?? []).map((f) => f.name);
+  const hint = (body.place ?? "").trim();
 
-  const place = await detectPlace(names);
+  const place = await detectPlace(names, hint);
   const mood = await analyzeMood(place);
   const map = await buildMap(place, mood);
   const art = await directArt(mood);

@@ -70,9 +70,9 @@ export default function HomePage() {
           </p>
         </div>
         <div className="col-span-12 md:col-span-8 grid grid-cols-1 md:grid-cols-3 gap-6">
-          <SamplePoster place="Lisbona" coord="38.71 / -9.14" mood={["rarefatto", "caldo", "mediterraneo"]} palette={["#e9d5b3", "#c8a87a", "#5d4a3a", "#1f1d1a"]} />
-          <SamplePoster place="Reykjavík" coord="64.14 / -21.94" mood={["nordico", "rarefatto", "minerale"]} palette={["#dfe4e9", "#a9b6c2", "#3a4a59", "#0f1418"]} />
-          <SamplePoster place="Tropea" coord="38.67 / 15.89" mood={["vibrante", "mediterraneo", "luce"]} palette={["#f5ecd9", "#e1b07a", "#2a78a6", "#0f1d2a"]} />
+          <SamplePoster place="Genova" coord="44.40 / 8.94" country="Italia" mood={["mediterraneo", "vibrante"]} palette={["#f4ebd7", "#d99970", "#c45c3a", "#3f6477", "#8a6f4e", "#1d1815"]} />
+          <SamplePoster place="Londra" coord="51.50 / -0.12" country="Regno Unito" mood={["urbano", "vibrante"]} palette={["#f4ecd9", "#3a6c70", "#7b3a4f", "#d8542c", "#8b8aa5", "#1a1a1a"]} />
+          <SamplePoster place="Tropea" coord="38.67 / 15.89" country="Italia" mood={["vibrante", "luce"]} palette={["#f5ecd9", "#e1b07a", "#2a78a6", "#a13a2e", "#7c6b5a", "#0f1d2a"]} />
         </div>
       </section>
     </div>
@@ -89,33 +89,90 @@ function ProcessStep({ n, title, body }: { n: string; title: string; body: strin
   );
 }
 
-function SamplePoster({ place, coord, mood, palette }: { place: string; coord: string; mood: string[]; palette: string[] }) {
+function SamplePoster({ place, coord, mood, palette, country }: { place: string; coord: string; mood: string[]; palette: string[]; country?: string }) {
+  // Mini tessellation preview — same idiom as the production poster
+  const COLS = 5;
+  const ROWS = 7;
+  const seed = place.charCodeAt(0) * 31 + place.charCodeAt(1);
+  const rng = (i: number) => {
+    let x = Math.sin((seed + i) * 91.3458) * 43758.5453;
+    return x - Math.floor(x);
+  };
+  const W = 200;
+  const H = 300;
+  const mapMargin = 20;
+  const mapBox = { x: mapMargin, y: 40, w: W - mapMargin * 2, h: 160 };
+  const cellW = mapBox.w / COLS;
+  const cellH = mapBox.h / ROWS;
+  const verts: number[][][] = [];
+  for (let r = 0; r <= ROWS; r++) {
+    verts[r] = [];
+    for (let c = 0; c <= COLS; c++) {
+      const onEdge = r === 0 || r === ROWS || c === 0 || c === COLS;
+      const x = mapBox.x + c * cellW + (onEdge ? 0 : (rng(r * 11 + c) - 0.5) * cellW * 0.45);
+      const y = mapBox.y + r * cellH + (onEdge ? 0 : (rng(r * 13 + c + 4) - 0.5) * cellH * 0.45);
+      verts[r].push([x, y]);
+    }
+  }
+  const fillCols = palette.slice(1); // skip background
+  const cells: Array<{ points: string; fill: string }> = [];
+  let i = 0;
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const pts = [verts[r][c], verts[r][c + 1], verts[r + 1][c + 1], verts[r + 1][c]];
+      const points = pts.map((p) => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" ");
+      const fill = fillCols[(i + Math.floor(rng(i * 7) * fillCols.length)) % fillCols.length];
+      cells.push({ points, fill });
+      i++;
+    }
+  }
+  // River curve
+  const riverY = mapBox.y + mapBox.h * 0.55;
+  const r1 = riverY + (rng(99) - 0.5) * 30;
+  const r2 = riverY + (rng(98) - 0.5) * 30;
+  const r3 = riverY + (rng(97) - 0.5) * 30;
+
   return (
     <figure className="space-y-3">
-      <div className="aspect-[2/3] border border-ink-100 p-5 relative overflow-hidden" style={{ background: palette[0] }}>
-        <div className="absolute inset-5 border" style={{ borderColor: palette[3] + "33" }} />
-        <svg viewBox="0 0 200 300" className="absolute inset-0 w-full h-full">
-          {/* Procedural mini map preview — distinct seed per place */}
-          {Array.from({ length: 22 }).map((_, i) => {
-            const seed = place.charCodeAt(0) + i;
-            const x1 = (seed * 13) % 180 + 10;
-            const y1 = (seed * 29) % 260 + 20;
-            const x2 = (seed * 37) % 180 + 10;
-            const y2 = (seed * 17) % 260 + 20;
-            return <line key={i} x1={x1} y1={y1} x2={x2} y2={y2} stroke={palette[2]} strokeWidth={0.6} opacity={0.55} />;
-          })}
+      <div className="aspect-[2/3] relative overflow-hidden" style={{ background: palette[0] }}>
+        <svg viewBox={`0 0 ${W} ${H}`} className="absolute inset-0 w-full h-full">
+          {cells.map((c, k) => (
+            <polygon key={k} points={c.points} fill={c.fill} stroke={palette[0]} strokeWidth="1.4" strokeLinejoin="round" />
+          ))}
+          <path
+            d={`M${mapBox.x - 20} ${r1} C${mapBox.x + 40} ${r1 + 10}, ${mapBox.x + 100} ${r2 - 20}, ${mapBox.x + 130} ${r2} S${mapBox.x + mapBox.w + 20} ${r3}, ${mapBox.x + mapBox.w + 30} ${r3}`}
+            fill="none"
+            stroke="#88BFD0"
+            strokeWidth="4"
+            strokeLinecap="round"
+          />
+          <text
+            x={W / 2}
+            y={H - 60}
+            textAnchor="middle"
+            fontFamily="'Cormorant Garamond', serif"
+            fontSize="26"
+            fill={palette[palette.length - 1]}
+            letterSpacing="3"
+            fontWeight="500"
+          >
+            {place.toUpperCase()}
+          </text>
+          {country && (
+            <text
+              x={W / 2}
+              y={H - 35}
+              textAnchor="middle"
+              fontFamily="Inter, sans-serif"
+              fontSize="8"
+              fill={palette[palette.length - 1]}
+              letterSpacing="1.5"
+              opacity="0.7"
+            >
+              {country}
+            </text>
+          )}
         </svg>
-        <div className="absolute bottom-5 left-5 right-5 flex items-end justify-between" style={{ color: palette[3] }}>
-          <div>
-            <p className="font-display text-2xl tracking-tight">{place}</p>
-            <p className="font-mono text-[10px] tracking-wide mt-1">{coord}</p>
-          </div>
-          <div className="flex flex-col items-end gap-0.5">
-            {palette.map((c, i) => (
-              <span key={i} className="w-4 h-1.5 block" style={{ background: c }} />
-            ))}
-          </div>
-        </div>
       </div>
       <figcaption className="flex items-center justify-between text-xs uppercase tracking-wide text-ink-500">
         <span>{place}</span>

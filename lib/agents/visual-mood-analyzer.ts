@@ -136,24 +136,129 @@ export async function analyzeMood(place: PlaceIdentity): Promise<VisualMood> {
       density: "densa",
       rhythm: "spezzato",
       atmosphere: ["vibrante", "organico", "caldo"]
+    },
+    Genova: {
+      palette: [
+        { hex: "#f4ebd7", role: "background", weight: 0.36 },
+        { hex: "#d99970", role: "highlight", weight: 0.18 },
+        { hex: "#c45c3a", role: "shadow", weight: 0.14 },
+        { hex: "#3f6477", role: "accent", weight: 0.16 },
+        { hex: "#8a6f4e", role: "highlight", weight: 0.10 },
+        { hex: "#1d1815", role: "ink", weight: 0.06 }
+      ],
+      temperature: "calda",
+      luminosity: 0.62,
+      contrast: 0.62,
+      saturation: 0.5,
+      density: "densa",
+      rhythm: "spezzato",
+      atmosphere: ["mediterraneo", "vibrante", "nostalgico"]
+    },
+    Barcellona: {
+      palette: [
+        { hex: "#f5ebd3", role: "background", weight: 0.34 },
+        { hex: "#e0a45e", role: "highlight", weight: 0.18 },
+        { hex: "#c4502b", role: "shadow", weight: 0.14 },
+        { hex: "#3a7f8c", role: "accent", weight: 0.18 },
+        { hex: "#a6b07a", role: "highlight", weight: 0.10 },
+        { hex: "#1a1a1a", role: "ink", weight: 0.06 }
+      ],
+      temperature: "calda",
+      luminosity: 0.7,
+      contrast: 0.6,
+      saturation: 0.6,
+      density: "densa",
+      rhythm: "fluido",
+      atmosphere: ["vibrante", "mediterraneo", "geometrico"]
+    },
+    Venezia: {
+      palette: [
+        { hex: "#efe6cf", role: "background", weight: 0.34 },
+        { hex: "#c79a6e", role: "highlight", weight: 0.18 },
+        { hex: "#7e8e3a", role: "accent", weight: 0.10 },
+        { hex: "#3b6a86", role: "accent", weight: 0.20 },
+        { hex: "#a64a2e", role: "shadow", weight: 0.10 },
+        { hex: "#171717", role: "ink", weight: 0.08 }
+      ],
+      temperature: "neutra",
+      luminosity: 0.66,
+      contrast: 0.56,
+      saturation: 0.46,
+      density: "media",
+      rhythm: "fluido",
+      atmosphere: ["nostalgico", "rarefatto", "intimo"]
+    },
+    Napoli: {
+      palette: [
+        { hex: "#f3e6c8", role: "background", weight: 0.32 },
+        { hex: "#d8a155", role: "highlight", weight: 0.18 },
+        { hex: "#b13a2b", role: "shadow", weight: 0.16 },
+        { hex: "#2c7a8a", role: "accent", weight: 0.16 },
+        { hex: "#a7b97a", role: "highlight", weight: 0.10 },
+        { hex: "#111111", role: "ink", weight: 0.08 }
+      ],
+      temperature: "calda",
+      luminosity: 0.72,
+      contrast: 0.66,
+      saturation: 0.62,
+      density: "densa",
+      rhythm: "spezzato",
+      atmosphere: ["vibrante", "mediterraneo", "urbano"]
+    },
+    Londra: {
+      palette: [
+        { hex: "#f4ecd9", role: "background", weight: 0.32 },
+        { hex: "#3a6c70", role: "accent", weight: 0.16 },
+        { hex: "#7b3a4f", role: "shadow", weight: 0.14 },
+        { hex: "#d8542c", role: "highlight", weight: 0.16 },
+        { hex: "#8b8aa5", role: "highlight", weight: 0.14 },
+        { hex: "#1a1a1a", role: "ink", weight: 0.08 }
+      ],
+      temperature: "neutra",
+      luminosity: 0.6,
+      contrast: 0.7,
+      saturation: 0.58,
+      density: "densa",
+      rhythm: "spezzato",
+      atmosphere: ["urbano", "vibrante", "geometrico"]
+    },
+    Parigi: {
+      palette: [
+        { hex: "#efe8d6", role: "background", weight: 0.34 },
+        { hex: "#c39a64", role: "highlight", weight: 0.2 },
+        { hex: "#7b5c3a", role: "shadow", weight: 0.14 },
+        { hex: "#5a6b7d", role: "accent", weight: 0.16 },
+        { hex: "#b06a3f", role: "highlight", weight: 0.10 },
+        { hex: "#1a1a1a", role: "ink", weight: 0.06 }
+      ],
+      temperature: "neutra",
+      luminosity: 0.66,
+      contrast: 0.5,
+      saturation: 0.42,
+      density: "media",
+      rhythm: "regolare",
+      atmosphere: ["delicato", "intimo", "nostalgico"]
     }
   };
   return (
     presets[place.city] ?? {
+      // Default "anonymous traveler" palette — kept vibrant so unknown cities
+      // still produce a poster worth printing instead of a beige rectangle.
       palette: [
-        { hex: "#efeae0", role: "background", weight: 0.4 },
-        { hex: "#c2b9a8", role: "highlight", weight: 0.2 },
-        { hex: "#6a6357", role: "accent", weight: 0.18 },
-        { hex: "#2c2a26", role: "ink", weight: 0.12 },
-        { hex: "#9a3b2c", role: "shadow", weight: 0.1 }
-      ],
+        { hex: "#f4ebd3", role: "background", weight: 0.30 },
+        { hex: "#3a6c70", role: "accent", weight: 0.16 },
+        { hex: "#7b3a4f", role: "shadow", weight: 0.14 },
+        { hex: "#d8542c", role: "highlight", weight: 0.16 },
+        { hex: "#8b8aa5", role: "highlight", weight: 0.14 },
+        { hex: "#1a1a1a", role: "ink", weight: 0.10 }
+      ] as any,
       temperature: "neutra",
-      luminosity: 0.6,
-      contrast: 0.5,
-      saturation: 0.4,
+      luminosity: 0.62,
+      contrast: 0.62,
+      saturation: 0.55,
       density: "media",
-      rhythm: "regolare",
-      atmosphere: ["urbano", "silenzioso"] as AtmosphereWord[]
+      rhythm: "spezzato",
+      atmosphere: ["urbano", "vibrante"] as AtmosphereWord[]
     }
   );
 }
