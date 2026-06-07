@@ -1,4 +1,5 @@
 import type { PlaceIdentity, VisualMood, MapData, Street, Polygon, Precision } from "../types";
+import { stitchOsmMap } from "../tile-stitcher";
 
 /**
  * AGENT 03 — MAP ENGINE
@@ -78,18 +79,35 @@ export async function buildMap(
 
   let data: MapData;
   try {
-    const osm = await queryOverpass(bbox, cfg);
-    data = {
-      bbox,
-      zoom: cfg.zoom,
-      precision,
-      source: "osm",
-      streets: osm.streets,
-      water: osm.water,
-      waterways: osm.waterways
-    };
+    // Run Overpass (vectors) and tile stitcher (raster) in parallel
+    const [osm, tileImage] = await Promise.all([
+      queryOverpass(bbox, cfg).catch((err) => {
+        console.warn("[map-engine] Overpass failed:", err?.message ?? err);
+        return null;
+      }),
+      stitchOsmMap(bbox, cfg.zoom).catch((err) => {
+        console.warn("[map-engine] tile stitch failed:", err?.message ?? err);
+        return null;
+      })
+    ]);
+
+    if (osm) {
+      data = {
+        bbox,
+        zoom: cfg.zoom,
+        precision,
+        source: "osm",
+        streets: osm.streets,
+        water: osm.water,
+        waterways: osm.waterways,
+        tileImage: tileImage ?? undefined
+      };
+    } else {
+      data = generateProceduralMap(bbox, cfg, precision, mood);
+      if (tileImage) data.tileImage = tileImage;
+    }
   } catch (err) {
-    console.warn("[map-engine] Overpass failed, using procedural fallback:", err);
+    console.warn("[map-engine] unexpected error, using procedural fallback:", err);
     data = generateProceduralMap(bbox, cfg, precision, mood);
   }
 

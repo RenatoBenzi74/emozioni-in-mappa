@@ -57,6 +57,12 @@ export interface MapData {
   streets: Street[];
   water: Polygon[];           // areal water (lakes, sea)
   waterways: Street[];        // linear water (rivers, canals)
+  /**
+   * Pre-rendered raster basemap (base64 data URL) — a stitched mosaic of
+   * REAL OpenStreetMap tiles for the bbox. The poster renderer embeds this
+   * as the foundation of the map area, ensuring the geometry is authentic.
+   */
+  tileImage?: { dataUrl: string; width: number; height: number; server: string };
 }
 
 export interface Street {

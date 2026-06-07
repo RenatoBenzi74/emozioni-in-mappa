@@ -1,22 +1,21 @@
-import type { FullInterpretation, Street, Polygon } from "./types";
-import { voronoi, type Point } from "./voronoi";
+import type { FullInterpretation } from "./types";
 
 /**
  * Real-map poster renderer.
  *
  * Visual idiom:
- *  - Cream background.
- *  - Real OSM data: streets (filtered by precision), water bodies, waterways.
- *  - Tessellation of palette-colored polygons covers the map crop. Cells
- *    are a Voronoi diagram seeded by REAL street intersections (denser
- *    intersections → smaller, more detailed cells; sparser → larger
- *    "open ground" cells). Where there are no intersections, fill with
- *    a jittered grid so the crop has full coverage.
- *  - Real streets are drawn on top as thin cream strokes — they "carve"
- *    the tessellation following the actual urban geometry.
- *  - Water (areal + linear) drawn on top in the brand blue, extending
- *    slightly beyond the crop where the river leaves the bbox.
+ *  - Real OpenStreetMap raster tiles stitched together = the map area.
+ *    This is downloaded server-side at request time; the geometry is
+ *    authentic (real streets, real water, real urban shapes).
+ *  - A palette-derived color wash recolors the tiles toward the user's
+ *    photo atmosphere (SVG <filter feColorMatrix> + multiply blend).
+ *  - Real waterways from Overpass are emphasized on top in the brand blue
+ *    so the river / coast extends slightly beyond the crop.
  *  - Big serif uppercase title + italic subtitle + country + coords.
+ *
+ *  If the tile download fails the renderer falls back to a Voronoi-style
+ *  tessellation seeded by real street intersections, so the poster is
+ *  never broken.
  */
 export function renderPosterSvg(
   full: FullInterpretation,
@@ -29,72 +28,92 @@ export function renderPosterSvg(
   const mapMargin = W * 0.10;
   const mapBox = { x: mapMargin, y: H * 0.10, w: W - mapMargin * 2, h: H * 0.46 };
 
-  // Mercator-ish projection inside the map crop
+  // Mercator-ish projection inside the map crop (Web Mercator)
   const [minLng, minLat, maxLng, maxLat] = map.bbox;
-  const proj = (lng: number, lat: number): Point => [
+  const projY = (lat: number) => {
+    const sinLat = Math.sin((lat * Math.PI) / 180);
+    return 0.5 - 0.25 * Math.log((1 + sinLat) / (1 - sinLat)) / Math.PI;
+  };
+  const yMin = projY(maxLat);
+  const yMax = projY(minLat);
+  const proj = (lng: number, lat: number): [number, number] => [
     mapBox.x + ((lng - minLng) / (maxLng - minLng)) * mapBox.w,
-    mapBox.y + (1 - (lat - minLat) / (maxLat - minLat)) * mapBox.h
+    mapBox.y + ((projY(lat) - yMin) / (yMax - yMin)) * mapBox.h
   ];
-  const projCoord = (c: [number, number]): Point => proj(c[0], c[1]);
+  const projCoord = (c: [number, number]) => proj(c[0], c[1]);
 
-  // ─── Palette for cells ─────────────────────────────────────────────────
-  const cellPalette = mood.palette
-    .filter((c) => c.role !== "background")
-    .map((c) => c.hex);
-  if (cellPalette.length === 0) cellPalette.push(art.accentColor, art.highlightColor);
+  // ─── Palette wash filter from photo palette ───────────────────────────
+  // Build a 4x4 color matrix that pushes the tile toward the dominant
+  // palette: average of accent + highlight tinted on top of cream.
+  const tintHex = mood.palette.find((p) => p.role === "shadow" || p.role === "accent")?.hex
+    ?? mood.palette[mood.palette.length - 1].hex;
+  const { r: tr, g: tg, b: tb } = hexToRgb(tintHex);
+  const tintMatrix = `
+    0.65 0.10 0.05 0 ${(tr / 255) * 0.10}
+    0.08 0.65 0.05 0 ${(tg / 255) * 0.10}
+    0.05 0.10 0.65 0 ${(tb / 255) * 0.10}
+    0    0    0    1 0
+  `.trim();
 
-  // ─── Voronoi seeds: real street intersections + jittered fillers ──────
-  const seed = Math.floor(Math.abs(place.coordinates.lat * 100000 + place.coordinates.lng * 100000));
-  const rng = mulberry32(seed);
+  const filterDef = `
+    <defs>
+      <filter id="paperize" color-interpolation-filters="sRGB">
+        <!-- Slightly desaturate, warm toward the palette tint -->
+        <feColorMatrix type="matrix" values="${tintMatrix}"/>
+        <feComponentTransfer>
+          <feFuncR type="linear" slope="1.05" intercept="0.03"/>
+          <feFuncG type="linear" slope="1.03" intercept="0.04"/>
+          <feFuncB type="linear" slope="0.95" intercept="0.05"/>
+        </feComponentTransfer>
+      </filter>
+      <clipPath id="mapcrop">
+        <rect x="${mapBox.x}" y="${mapBox.y}" width="${mapBox.w}" height="${mapBox.h}"/>
+      </clipPath>
+    </defs>
+  `;
 
-  const seeds = collectSeeds(map.streets.map((s) => s.coords.map(projCoord)), mapBox, rng, mood.density);
+  // ─── Map layer ────────────────────────────────────────────────────────
+  let mapLayer = "";
+  if (map.tileImage) {
+    // Real OSM raster, paper-toned
+    mapLayer = `
+      <g clip-path="url(#mapcrop)">
+        <image x="${mapBox.x}" y="${mapBox.y}" width="${mapBox.w}" height="${mapBox.h}"
+               preserveAspectRatio="xMidYMid slice"
+               href="${map.tileImage.dataUrl}"
+               filter="url(#paperize)"/>
+      </g>
+    `;
+  } else {
+    // Fallback: vector treatment (Voronoi-on-intersections)
+    mapLayer = renderVectorFallback(map, mood, art, mapBox, projCoord, place);
+  }
 
-  // ─── Voronoi cells ─────────────────────────────────────────────────────
-  const cells = voronoi(seeds, { bbox: [mapBox.x, mapBox.y, mapBox.x + mapBox.w, mapBox.y + mapBox.h] });
-  const cellsSvg = cells
-    .map((cell, idx) => {
-      if (cell.length < 3) return "";
-      const pts = cell.map((p) => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" ");
-      const fill = cellPalette[(idx + Math.floor(rng() * cellPalette.length)) % cellPalette.length];
-      return `<polygon points="${pts}" fill="${fill}" stroke="${art.background}" stroke-width="1.8" stroke-linejoin="round"/>`;
-    })
-    .join("");
-
-  // ─── Streets on top — thin cream strokes, REAL geometry ───────────────
-  const streetsSvg = map.streets
-    .map((s) => {
-      const d = pathFromCoords(s.coords, projCoord);
-      if (!d) return "";
-      const w = s.type === "primary" ? 2.2 : s.type === "secondary" ? 1.5 : s.type === "tertiary" ? 1.0 : 0.6;
-      return `<path d="${d}" fill="none" stroke="${art.background}" stroke-width="${w}" stroke-linecap="round" stroke-linejoin="round" opacity="0.9"/>`;
-    })
-    .join("");
-
-  // ─── Water on top — REAL polygons + waterway lines ────────────────────
+  // ─── Waterways on top — real rivers in the brand blue ─────────────────
   const riverColor = pickRiverColor(mood);
-  const waterAreasSvg = map.water
-    .map((p) => {
-      if (p.coords.length < 3) return "";
-      const pts = p.coords.map((c) => projCoord(c)).map((q) => `${q[0].toFixed(1)},${q[1].toFixed(1)}`).join(" ");
-      return `<polygon points="${pts}" fill="${riverColor}" opacity="0.95"/>`;
-    })
-    .join("");
   const waterwaysSvg = map.waterways
     .map((s) => {
       const d = pathFromCoords(s.coords, projCoord);
       if (!d) return "";
-      return `<path d="${d}" fill="none" stroke="${riverColor}" stroke-width="14" stroke-linecap="round" stroke-linejoin="round" opacity="0.95"/>`;
+      return `<path d="${d}" fill="none" stroke="${riverColor}" stroke-width="${map.tileImage ? 6 : 14}" stroke-linecap="round" stroke-linejoin="round" opacity="${map.tileImage ? 0.92 : 0.95}"/>`;
     })
     .join("");
 
   // ─── Top metadata strip ───────────────────────────────────────────────
-  const sourceTag = map.source === "osm" ? "OSM · OPENSTREETMAP" : "STUDIO · PROCEDURAL";
+  const sourceTag = map.tileImage
+    ? `OSM · ${map.tileImage.server.toUpperCase()}`
+    : map.source === "osm"
+    ? "OSM · VECTOR"
+    : "STUDIO · PROCEDURAL";
   const topMeta = `
-    <g font-family="JetBrains Mono, monospace" fill="${art.inkColor}" font-size="10" letter-spacing="2.2" opacity="0.5">
+    <g font-family="JetBrains Mono, monospace" fill="${art.inkColor}" font-size="10" letter-spacing="2.2" opacity="0.55">
       <text x="${mapBox.x}" y="${H * 0.06}">EMOZIONI IN MAPPA · ${escapeXml(map.precision.toUpperCase())}</text>
       <text x="${W - mapBox.x}" y="${H * 0.06}" text-anchor="end">${sourceTag}</text>
     </g>
   `;
+
+  // ─── Thin frame around the map crop ──────────────────────────────────
+  const frame = `<rect x="${mapBox.x}" y="${mapBox.y}" width="${mapBox.w}" height="${mapBox.h}" fill="none" stroke="${art.inkColor}" stroke-width="0.6" opacity="0.4"/>`;
 
   // ─── Title block ──────────────────────────────────────────────────────
   const titleY = H * 0.78;
@@ -142,64 +161,60 @@ export function renderPosterSvg(
     width: W,
     height: H,
     svg: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">
+      ${filterDef}
       <rect width="${W}" height="${H}" fill="${art.background}"/>
       ${topMeta}
-      <g>
-        ${cellsSvg}
-        ${streetsSvg}
-        ${waterAreasSvg}
-        ${waterwaysSvg}
-      </g>
+      ${mapLayer}
+      <g clip-path="url(#mapcrop)">${waterwaysSvg}</g>
+      ${frame}
       ${titleBlock}
     </svg>`
   };
 }
 
-// ─── Seed collection: intersection-aware ─────────────────────────────────
+// ─── Vector-only fallback (used if raster stitch failed) ─────────────────
 
-function collectSeeds(
-  projectedStreets: Point[][],
+function renderVectorFallback(
+  map: FullInterpretation["map"],
+  mood: FullInterpretation["mood"],
+  art: FullInterpretation["art"],
   mapBox: { x: number; y: number; w: number; h: number },
-  rng: () => number,
-  density: "rarefatta" | "media" | "densa"
-): Point[] {
-  // Real points come from EVERY street vertex — clipped to the map crop.
-  // Down-sample so we don't get hundreds of seeds clustered on long roads.
-  const minSep = density === "rarefatta" ? 40 : density === "densa" ? 18 : 28;
-  const inside = (p: Point) =>
-    p[0] >= mapBox.x && p[0] <= mapBox.x + mapBox.w &&
-    p[1] >= mapBox.y && p[1] <= mapBox.y + mapBox.h;
-
-  const seeds: Point[] = [];
-  const accept = (p: Point) => {
-    if (!inside(p)) return;
-    for (const q of seeds) {
-      const dx = p[0] - q[0];
-      const dy = p[1] - q[1];
-      if (dx * dx + dy * dy < minSep * minSep) return;
-    }
-    seeds.push(p);
-  };
-
-  for (const segs of projectedStreets) {
-    for (const p of segs) accept(p);
-  }
-
-  // Fillers: if real streets sparse (especially at "essenziale" zoom), top
-  // up with random points so cells cover the full crop. Always add a
-  // baseline filling so we never end up with a single huge cell.
-  const targetMin = density === "rarefatta" ? 30 : density === "densa" ? 100 : 60;
-  let safety = 0;
-  while (seeds.length < targetMin && safety++ < 5000) {
-    accept([mapBox.x + rng() * mapBox.w, mapBox.y + rng() * mapBox.h]);
-  }
-
-  return seeds;
+  projCoord: (c: [number, number]) => [number, number],
+  place: FullInterpretation["place"]
+): string {
+  // Simple darkest streets style: cream background, real streets in ink,
+  // real water polygons in blue. Honest map look.
+  const streetsSvg = map.streets
+    .map((s) => {
+      const d = pathFromCoords(s.coords, projCoord);
+      if (!d) return "";
+      const w = s.type === "primary" ? 3.4 : s.type === "secondary" ? 2.2 : s.type === "tertiary" ? 1.4 : 0.7;
+      return `<path d="${d}" fill="none" stroke="${art.inkColor}" stroke-width="${w}" stroke-linecap="round" stroke-linejoin="round" opacity="0.85"/>`;
+    })
+    .join("");
+  const riverColor = pickRiverColor(mood);
+  const waterSvg = map.water
+    .map((p) => {
+      if (p.coords.length < 3) return "";
+      const pts = p.coords.map(projCoord).map((q) => `${q[0].toFixed(1)},${q[1].toFixed(1)}`).join(" ");
+      return `<polygon points="${pts}" fill="${riverColor}" opacity="0.95"/>`;
+    })
+    .join("");
+  return `
+    <g clip-path="url(#mapcrop)">
+      <rect x="${mapBox.x}" y="${mapBox.y}" width="${mapBox.w}" height="${mapBox.h}" fill="#f1ebda"/>
+      ${waterSvg}
+      ${streetsSvg}
+    </g>
+  `;
 }
 
-// ─── Path / color helpers ────────────────────────────────────────────────
+// ─── Helpers ─────────────────────────────────────────────────────────────
 
-function pathFromCoords(coords: Array<[number, number]>, proj: (c: [number, number]) => Point): string {
+function pathFromCoords(
+  coords: Array<[number, number]>,
+  proj: (c: [number, number]) => [number, number]
+): string {
   if (!coords || coords.length < 2) return "";
   let d = "";
   for (let i = 0; i < coords.length; i++) {
@@ -210,17 +225,15 @@ function pathFromCoords(coords: Array<[number, number]>, proj: (c: [number, numb
 }
 
 function pickRiverColor(mood: FullInterpretation["mood"]): string {
-  return mood.temperature === "calda" ? "#7FB7C9" : "#8FC4D4";
+  return mood.temperature === "calda" ? "#5A8FA8" : "#3F7B96";
 }
 
-function mulberry32(a: number) {
-  return function () {
-    a |= 0;
-    a = (a + 0x6d2b79f5) | 0;
-    let t = a;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+function hexToRgb(hex: string): { r: number; g: number; b: number } {
+  const h = hex.replace("#", "");
+  return {
+    r: parseInt(h.slice(0, 2), 16) || 0,
+    g: parseInt(h.slice(2, 4), 16) || 0,
+    b: parseInt(h.slice(4, 6), 16) || 0
   };
 }
 
