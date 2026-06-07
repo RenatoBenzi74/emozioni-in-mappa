@@ -5,11 +5,29 @@ import { useState } from "react";
 
 const SUGGESTIONS = ["Lisbona", "Tropea", "Genova", "Barcellona", "Venezia", "Napoli", "Kyoto", "Copenhagen", "Marrakech", "Londra", "Parigi", "Reykjavík"];
 
+type Precision = "essenziale" | "standard" | "cartografica";
+
+const PRECISION_LABELS: Record<Precision, { title: string; body: string }> = {
+  essenziale: {
+    title: "Essenziale",
+    body: "Solo arterie principali. Vista da manifesto. ~500 m intorno al centro."
+  },
+  standard: {
+    title: "Standard",
+    body: "Arterie e secondarie. Equilibrio tra leggibilità e dettaglio. ~830 m."
+  },
+  cartografica: {
+    title: "Cartografica",
+    body: "Tutto il tessuto urbano fino alle residenziali. Trama densa. ~1.3 km."
+  }
+};
+
 export default function UploadPage() {
   const router = useRouter();
   const [files, setFiles] = useState<File[]>([]);
   const [drag, setDrag] = useState(false);
   const [place, setPlace] = useState("");
+  const [precision, setPrecision] = useState<Precision>("standard");
 
   const minFilesOk = files.length >= 3;
   const placeOk = place.trim().length >= 2;
@@ -26,6 +44,7 @@ export default function UploadPage() {
     const meta = files.map((f) => ({ name: f.name, size: f.size }));
     sessionStorage.setItem("eim:files", JSON.stringify(meta));
     sessionStorage.setItem("eim:place", place.trim());
+    sessionStorage.setItem("eim:precision", precision);
     router.push("/analyze");
   };
 
@@ -78,6 +97,41 @@ export default function UploadPage() {
                 {s}
               </button>
             ))}
+          </div>
+        </div>
+
+        {/* Precision picker */}
+        <div className="space-y-3">
+          <p className="font-mono text-[10px] tracking-wide uppercase text-ink-500">
+            Con quanta precisione vuoi la mappa?
+          </p>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            {(Object.keys(PRECISION_LABELS) as Precision[]).map((p) => {
+              const { title, body } = PRECISION_LABELS[p];
+              const active = precision === p;
+              return (
+                <button
+                  key={p}
+                  type="button"
+                  onClick={() => setPrecision(p)}
+                  className={`text-left p-4 border transition-colors duration-300 ${
+                    active
+                      ? "border-ink-900 bg-ink-900 text-paper-50"
+                      : "border-ink-100 hover:border-ink-700"
+                  }`}
+                >
+                  <div className="flex items-baseline justify-between">
+                    <span className="font-display text-lg">{title}</span>
+                    <span className={`font-mono text-[10px] ${active ? "text-paper-50/60" : "text-ink-500"}`}>
+                      0{(["essenziale", "standard", "cartografica"] as Precision[]).indexOf(p) + 1}
+                    </span>
+                  </div>
+                  <p className={`mt-1 text-xs leading-relaxed ${active ? "text-paper-50/70" : "text-ink-500"}`}>
+                    {body}
+                  </p>
+                </button>
+              );
+            })}
           </div>
         </div>
 

@@ -1,21 +1,22 @@
-import type { FullInterpretation } from "./types";
+import type { FullInterpretation, Street, Polygon } from "./types";
+import { voronoi, type Point } from "./voronoi";
 
 /**
- * Tessellation-style poster renderer.
+ * Real-map poster renderer.
  *
- * Visual idiom (matches reference posters in the brief):
- *  - Cream/paper background.
- *  - Map area is a tessellation of irregular polygons (jittered grid),
- *    each filled with a distinct color from the user's photo palette.
- *  - A river/coast crosses the map as a smooth blue curve that EXITS
- *    the map crop on both sides (extends onto the cream paper).
- *  - Big serif uppercase title (city) with generous letter-spacing.
- *  - Small sans subtitle (country).
- *  - Tiny mono baseline with coordinates.
- *
- * The renderer is pure SVG (no canvas, no raster) and deterministic
- * for a given place — so the same Genova always produces the same
- * tessellation, but with palette derived from THE USER'S photos.
+ * Visual idiom:
+ *  - Cream background.
+ *  - Real OSM data: streets (filtered by precision), water bodies, waterways.
+ *  - Tessellation of palette-colored polygons covers the map crop. Cells
+ *    are a Voronoi diagram seeded by REAL street intersections (denser
+ *    intersections → smaller, more detailed cells; sparser → larger
+ *    "open ground" cells). Where there are no intersections, fill with
+ *    a jittered grid so the crop has full coverage.
+ *  - Real streets are drawn on top as thin cream strokes — they "carve"
+ *    the tessellation following the actual urban geometry.
+ *  - Water (areal + linear) drawn on top in the brand blue, extending
+ *    slightly beyond the crop where the river leaves the bbox.
+ *  - Big serif uppercase title + italic subtitle + country + coords.
  */
 export function renderPosterSvg(
   full: FullInterpretation,
@@ -23,78 +24,82 @@ export function renderPosterSvg(
 ): { svg: string; width: number; height: number } {
   const W = 800;
   const H = format === "vertical-portrait" ? 1200 : 800;
+  const { art, type, mood, place, map } = full;
 
-  const { art, type, mood, place } = full;
-
-  // Deterministic RNG from place + photo seed → same input, same output
-  const seed = Math.floor(
-    Math.abs(place.coordinates.lat * 100000 + place.coordinates.lng * 100000) + place.city.charCodeAt(0) * 7919
-  );
-  const rng = mulberry32(seed);
-
-  // Map area — vertical poster: map occupies upper ~50%
   const mapMargin = W * 0.10;
-  const mapBox = {
-    x: mapMargin,
-    y: H * 0.10,
-    w: W - mapMargin * 2,
-    h: H * 0.46
-  };
+  const mapBox = { x: mapMargin, y: H * 0.10, w: W - mapMargin * 2, h: H * 0.46 };
 
-  // Build the cell palette from the user's photos
-  // (background and pure ink are excluded — they are the paper + text colors)
+  // Mercator-ish projection inside the map crop
+  const [minLng, minLat, maxLng, maxLat] = map.bbox;
+  const proj = (lng: number, lat: number): Point => [
+    mapBox.x + ((lng - minLng) / (maxLng - minLng)) * mapBox.w,
+    mapBox.y + (1 - (lat - minLat) / (maxLat - minLat)) * mapBox.h
+  ];
+  const projCoord = (c: [number, number]): Point => proj(c[0], c[1]);
+
+  // ─── Palette for cells ─────────────────────────────────────────────────
   const cellPalette = mood.palette
     .filter((c) => c.role !== "background")
     .map((c) => c.hex);
-
   if (cellPalette.length === 0) cellPalette.push(art.accentColor, art.highlightColor);
 
-  // 1. Tessellation
-  const cells = generateJitteredCells(mapBox, rng, mood.density);
+  // ─── Voronoi seeds: real street intersections + jittered fillers ──────
+  const seed = Math.floor(Math.abs(place.coordinates.lat * 100000 + place.coordinates.lng * 100000));
+  const rng = mulberry32(seed);
+
+  const seeds = collectSeeds(map.streets.map((s) => s.coords.map(projCoord)), mapBox, rng, mood.density);
+
+  // ─── Voronoi cells ─────────────────────────────────────────────────────
+  const cells = voronoi(seeds, { bbox: [mapBox.x, mapBox.y, mapBox.x + mapBox.w, mapBox.y + mapBox.h] });
   const cellsSvg = cells
     .map((cell, idx) => {
-      const points = cell.map((p) => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" ");
-      // Color cycles through the palette with a small chance of repeating
-      const color = pickCellColor(cellPalette, idx, rng);
-      return `<polygon points="${points}" fill="${color}" stroke="${art.background}" stroke-width="2.2" stroke-linejoin="round"/>`;
+      if (cell.length < 3) return "";
+      const pts = cell.map((p) => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" ");
+      const fill = cellPalette[(idx + Math.floor(rng() * cellPalette.length)) % cellPalette.length];
+      return `<polygon points="${pts}" fill="${fill}" stroke="${art.background}" stroke-width="1.8" stroke-linejoin="round"/>`;
     })
     .join("");
 
-  // 2. River / coast — extends BEYOND the map crop on both sides.
-  // Default: include water for visual interest. The river-line works as
-  // the Thames / Tago / Senna / coast / canal / passage / axis depending
-  // on the city — it's the editorial element that "breaks" the tessellation.
-  const landlockedHints = ["minerale", "industriale"];
-  const explicitlyLandlocked =
-    landlockedHints.every((w) => false) /* placeholder */ ||
-    /^(Madrid|Milano|Bologna|Vienna|Berlino|Praga|Monaco|Torino)$/i.test(place.city.trim());
-  const hasWater = !explicitlyLandlocked;
+  // ─── Streets on top — thin cream strokes, REAL geometry ───────────────
+  const streetsSvg = map.streets
+    .map((s) => {
+      const d = pathFromCoords(s.coords, projCoord);
+      if (!d) return "";
+      const w = s.type === "primary" ? 2.2 : s.type === "secondary" ? 1.5 : s.type === "tertiary" ? 1.0 : 0.6;
+      return `<path d="${d}" fill="none" stroke="${art.background}" stroke-width="${w}" stroke-linecap="round" stroke-linejoin="round" opacity="0.9"/>`;
+    })
+    .join("");
 
-  let riverSvg = "";
-  if (hasWater) {
-    const riverPath = generateRiverPath(mapBox, rng);
-    const riverColor = pickRiverColor(mood, cellPalette);
-    riverSvg = `<path d="${riverPath}" fill="none" stroke="${riverColor}" stroke-width="18" stroke-linecap="round" stroke-linejoin="round" opacity="0.95"/>`;
-  }
+  // ─── Water on top — REAL polygons + waterway lines ────────────────────
+  const riverColor = pickRiverColor(mood);
+  const waterAreasSvg = map.water
+    .map((p) => {
+      if (p.coords.length < 3) return "";
+      const pts = p.coords.map((c) => projCoord(c)).map((q) => `${q[0].toFixed(1)},${q[1].toFixed(1)}`).join(" ");
+      return `<polygon points="${pts}" fill="${riverColor}" opacity="0.95"/>`;
+    })
+    .join("");
+  const waterwaysSvg = map.waterways
+    .map((s) => {
+      const d = pathFromCoords(s.coords, projCoord);
+      if (!d) return "";
+      return `<path d="${d}" fill="none" stroke="${riverColor}" stroke-width="14" stroke-linecap="round" stroke-linejoin="round" opacity="0.95"/>`;
+    })
+    .join("");
 
-  // 3. Top metadata strip — discreet
+  // ─── Top metadata strip ───────────────────────────────────────────────
+  const sourceTag = map.source === "osm" ? "OSM · OPENSTREETMAP" : "STUDIO · PROCEDURAL";
   const topMeta = `
-    <g font-family="${type.family.mono}" fill="${art.inkColor}" font-size="10" letter-spacing="2.2" opacity="0.5">
-      <text x="${mapBox.x}" y="${H * 0.06}">EMOZIONI IN MAPPA · STUDIO</text>
-      <text x="${W - mapBox.x}" y="${H * 0.06}" text-anchor="end">N° I / ${new Date().getFullYear()}</text>
+    <g font-family="JetBrains Mono, monospace" fill="${art.inkColor}" font-size="10" letter-spacing="2.2" opacity="0.5">
+      <text x="${mapBox.x}" y="${H * 0.06}">EMOZIONI IN MAPPA · ${escapeXml(map.precision.toUpperCase())}</text>
+      <text x="${W - mapBox.x}" y="${H * 0.06}" text-anchor="end">${sourceTag}</text>
     </g>
   `;
 
-  // 4. Title block — BIG editorial uppercase title.
-  // `textLength` + `lengthAdjust="spacing"` force-fits the text to exactly
-  // the target width regardless of which font is loaded (avoids overflow
-  // when Cormorant Garamond isn't available, e.g. server-side rasterization).
-  // The font-size sets the visual weight; textLength sets the tracking.
+  // ─── Title block ──────────────────────────────────────────────────────
   const titleY = H * 0.78;
   const n = Math.max(type.title.length, 1);
   const targetTitleWidth = W * 0.72;
-  // Baseline size: short words → bigger, longer words → smaller.
-  // Capped at 96 to keep proportion with the rest of the layout.
   const titleSize = Math.min(96, Math.max(54, 520 / Math.max(n, 4)));
   const titleBlock = `
     <g text-anchor="middle">
@@ -139,119 +144,74 @@ export function renderPosterSvg(
     svg: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">
       <rect width="${W}" height="${H}" fill="${art.background}"/>
       ${topMeta}
-      ${cellsSvg}
-      ${riverSvg}
+      <g>
+        ${cellsSvg}
+        ${streetsSvg}
+        ${waterAreasSvg}
+        ${waterwaysSvg}
+      </g>
       ${titleBlock}
     </svg>`
   };
 }
 
-// ─── Tessellation generator ────────────────────────────────────────────────
+// ─── Seed collection: intersection-aware ─────────────────────────────────
 
-function generateJitteredCells(
+function collectSeeds(
+  projectedStreets: Point[][],
   mapBox: { x: number; y: number; w: number; h: number },
   rng: () => number,
   density: "rarefatta" | "media" | "densa"
-): Array<Array<[number, number]>> {
-  const cols = density === "rarefatta" ? 5 : density === "densa" ? 9 : 7;
-  const rows = Math.max(4, Math.round((cols * mapBox.h) / mapBox.w));
-  const cellW = mapBox.w / cols;
-  const cellH = mapBox.h / rows;
-  // Jitter amount: ~30–40% of cell size → produces organic but readable cells
-  const jx = cellW * 0.42;
-  const jy = cellH * 0.42;
+): Point[] {
+  // Real points come from EVERY street vertex — clipped to the map crop.
+  // Down-sample so we don't get hundreds of seeds clustered on long roads.
+  const minSep = density === "rarefatta" ? 40 : density === "densa" ? 18 : 28;
+  const inside = (p: Point) =>
+    p[0] >= mapBox.x && p[0] <= mapBox.x + mapBox.w &&
+    p[1] >= mapBox.y && p[1] <= mapBox.y + mapBox.h;
 
-  // Build a grid of vertices, jittered on interior nodes
-  const verts: Array<Array<[number, number]>> = [];
-  for (let r = 0; r <= rows; r++) {
-    verts[r] = [];
-    for (let c = 0; c <= cols; c++) {
-      const onEdge = r === 0 || r === rows || c === 0 || c === cols;
-      const x = mapBox.x + c * cellW + (onEdge ? 0 : (rng() - 0.5) * jx);
-      const y = mapBox.y + r * cellH + (onEdge ? 0 : (rng() - 0.5) * jy);
-      verts[r].push([x, y]);
+  const seeds: Point[] = [];
+  const accept = (p: Point) => {
+    if (!inside(p)) return;
+    for (const q of seeds) {
+      const dx = p[0] - q[0];
+      const dy = p[1] - q[1];
+      if (dx * dx + dy * dy < minSep * minSep) return;
     }
+    seeds.push(p);
+  };
+
+  for (const segs of projectedStreets) {
+    for (const p of segs) accept(p);
   }
 
-  // Each cell is a quadrilateral from 4 grid vertices
-  const cells: Array<Array<[number, number]>> = [];
-  for (let r = 0; r < rows; r++) {
-    for (let c = 0; c < cols; c++) {
-      cells.push([verts[r][c], verts[r][c + 1], verts[r + 1][c + 1], verts[r + 1][c]]);
-    }
+  // Fillers: if real streets sparse (especially at "essenziale" zoom), top
+  // up with random points so cells cover the full crop. Always add a
+  // baseline filling so we never end up with a single huge cell.
+  const targetMin = density === "rarefatta" ? 30 : density === "densa" ? 100 : 60;
+  let safety = 0;
+  while (seeds.length < targetMin && safety++ < 5000) {
+    accept([mapBox.x + rng() * mapBox.w, mapBox.y + rng() * mapBox.h]);
   }
-  return cells;
+
+  return seeds;
 }
 
-// ─── River path ───────────────────────────────────────────────────────────
+// ─── Path / color helpers ────────────────────────────────────────────────
 
-function generateRiverPath(mapBox: { x: number; y: number; w: number; h: number }, rng: () => number): string {
-  // Smooth Catmull-Rom curve from BEYOND the left edge to BEYOND the right edge.
-  const baseY = mapBox.y + mapBox.h * (0.45 + (rng() - 0.5) * 0.25);
-  const extend = mapBox.w * 0.16;
-  const pts: Array<[number, number]> = [];
-  pts.push([mapBox.x - extend, baseY + (rng() - 0.5) * 30]);
-  const ctrl = 7;
-  for (let i = 0; i <= ctrl; i++) {
-    const x = mapBox.x + (i / ctrl) * mapBox.w;
-    const y = baseY + (rng() - 0.5) * 110;
-    pts.push([x, y]);
+function pathFromCoords(coords: Array<[number, number]>, proj: (c: [number, number]) => Point): string {
+  if (!coords || coords.length < 2) return "";
+  let d = "";
+  for (let i = 0; i < coords.length; i++) {
+    const p = proj(coords[i]);
+    d += `${i === 0 ? "M" : "L"}${p[0].toFixed(1)} ${p[1].toFixed(1)} `;
   }
-  pts.push([mapBox.x + mapBox.w + extend, baseY + (rng() - 0.5) * 30]);
-  return catmullRomPath(pts, 0.5);
+  return d.trim();
 }
 
-function catmullRomPath(points: Array<[number, number]>, tension: number): string {
-  if (points.length < 2) return "";
-  let d = `M${points[0][0].toFixed(1)} ${points[0][1].toFixed(1)}`;
-  for (let i = 0; i < points.length - 1; i++) {
-    const p0 = points[i - 1] ?? points[i];
-    const p1 = points[i];
-    const p2 = points[i + 1];
-    const p3 = points[i + 2] ?? p2;
-    const c1x = p1[0] + ((p2[0] - p0[0]) / 6) * tension;
-    const c1y = p1[1] + ((p2[1] - p0[1]) / 6) * tension;
-    const c2x = p2[0] - ((p3[0] - p1[0]) / 6) * tension;
-    const c2y = p2[1] - ((p3[1] - p1[1]) / 6) * tension;
-    d += ` C${c1x.toFixed(1)} ${c1y.toFixed(1)}, ${c2x.toFixed(1)} ${c2y.toFixed(1)}, ${p2[0].toFixed(1)} ${p2[1].toFixed(1)}`;
-  }
-  return d;
-}
-
-// ─── Color selection helpers ──────────────────────────────────────────────
-
-function pickCellColor(palette: string[], idx: number, rng: () => number): string {
-  // Cycle through palette with a slight stochastic variation to avoid
-  // visible repeat patterns on the grid.
-  const offset = Math.floor(rng() * palette.length);
-  return palette[(idx + offset) % palette.length];
-}
-
-function pickRiverColor(mood: FullInterpretation["mood"], _cellPalette: string[]): string {
-  // Fixed light steel-blue. The "water" is the brand-identity element
-  // of the poster — it must ALWAYS contrast with the tessellation so that
-  // the river/coast reads instantly. Slight warm vs cool variant.
+function pickRiverColor(mood: FullInterpretation["mood"]): string {
   return mood.temperature === "calda" ? "#7FB7C9" : "#8FC4D4";
 }
-
-function hexToRgb(hex: string): { r: number; g: number; b: number } {
-  const h = hex.replace("#", "");
-  return {
-    r: parseInt(h.slice(0, 2), 16),
-    g: parseInt(h.slice(2, 4), 16),
-    b: parseInt(h.slice(4, 6), 16)
-  };
-}
-
-function lighten(hex: string, amount: number): string {
-  const { r, g, b } = hexToRgb(hex);
-  const lr = Math.round(r + (255 - r) * amount);
-  const lg = Math.round(g + (255 - g) * amount);
-  const lb = Math.round(b + (255 - b) * amount);
-  return `#${lr.toString(16).padStart(2, "0")}${lg.toString(16).padStart(2, "0")}${lb.toString(16).padStart(2, "0")}`;
-}
-
-// ─── Utilities ────────────────────────────────────────────────────────────
 
 function mulberry32(a: number) {
   return function () {

@@ -1,89 +1,236 @@
-import type { PlaceIdentity, VisualMood, MapData, Street } from "../types";
+import type { PlaceIdentity, VisualMood, MapData, Street, Polygon, Precision } from "../types";
 
 /**
  * AGENT 03 — MAP ENGINE
  *
- * Production: query OpenStreetMap / Overpass / Mapbox with the
- * coordinates from Place Detector, then simplify with topojson.
+ * Recupera dati cartografici REALI da OpenStreetMap via Overpass API.
+ * Tre livelli di precisione (selezionati dall'utente nella pagina upload):
  *
- * In produzione l'agente:
- *   1. Riceve coordinate e densità target dall'analisi mood.
- *      - Mood "rarefatto" → bbox più ampio (zoom 12-13)
- *      - Mood "intimo" → bbox stretto (zoom 15-16)
- *   2. Scarica via Overpass un set di way (primary, secondary,
- *      tertiary, residential, pedestrian) + waterway/water + parchi.
- *   3. Simplifica geometrie (Douglas-Peucker, tolleranza correlata
- *      al rhythm: "regolare" → bassa, "fluido" → media).
- *   4. Filtra strade per importanza: in densità "rarefatta" tiene
- *      solo primary+secondary; in "densa" tutto.
- *   5. Restituisce MapData già nello spazio normalizzato 0..1.
+ *   essenziale   → ~700m x 700m, solo arterie principali. Vista "manifesto".
+ *   standard     → ~1.0km x 1.0km, primarie + secondarie + terziarie.
+ *   cartografica → ~1.4km x 1.4km, fino alle residenziali. Trama densa.
  *
- * Questo MVP genera una rete urbana procedurale deterministica
- * a partire dalle coordinate. La rete NON è geograficamente
- * accurata ma rispetta densità e ritmo richiesti dal mood.
+ * Se l'Overpass non risponde (rete assente, rate-limit) si scende a una
+ * mappa procedurale deterministica, in modo che il prodotto non si
+ * "rompa" mai. Questo fallback è anche utile in fase di sviluppo.
+ *
+ * Production prompt (Claude reasoning step prima della query OSM):
+ * ----------------------------------------------------------------
+ * Sei un editor cartografico. Decidi il piano di query per una mappa
+ * artistica del luogo dato. Ricevi PlaceIdentity, VisualMood, Precision.
+ * Restituisci JSON: bbox, zoom, layer da scaricare, simplification,
+ * ragione breve. L'agente esecutore userà il piano per chiamare Overpass.
+ * ----------------------------------------------------------------
  */
-export async function buildMap(place: PlaceIdentity, mood: VisualMood): Promise<MapData> {
-  const seed = Math.floor(Math.abs(place.coordinates.lat * 1000 + place.coordinates.lng * 1000));
-  const rng = mulberry32(seed);
 
-  const density = mood.density;
-  const rhythm = mood.rhythm;
+const PRECISION_CONFIG: Record<Precision, { halfSpanDeg: number; highways: string[]; zoom: number }> = {
+  essenziale: {
+    halfSpanDeg: 0.0045,            // ~500m N-S
+    highways: ["motorway", "trunk", "primary", "secondary"],
+    zoom: 13
+  },
+  standard: {
+    halfSpanDeg: 0.0075,            // ~830m N-S
+    highways: ["motorway", "trunk", "primary", "secondary", "tertiary"],
+    zoom: 14
+  },
+  cartografica: {
+    halfSpanDeg: 0.012,             // ~1330m N-S
+    highways: ["motorway", "trunk", "primary", "secondary", "tertiary", "residential", "unclassified", "living_street"],
+    zoom: 15
+  }
+};
 
-  // Translate mood → procedural parameters
-  const streetCounts = { rarefatta: 14, media: 28, densa: 48 } as const;
-  const target = streetCounts[density];
+const OVERPASS_ENDPOINTS = [
+  "https://overpass-api.de/api/interpreter",
+  "https://overpass.kumi.systems/api/interpreter",
+  "https://overpass.openstreetmap.fr/api/interpreter"
+];
 
-  const streets: Street[] = [];
-  const tiers: Street["type"][] = ["primary", "secondary", "tertiary", "residential", "pedestrian"];
+const OVERPASS_TIMEOUT_MS = 18_000;
 
-  for (let i = 0; i < target; i++) {
-    const tier = tiers[Math.min(tiers.length - 1, Math.floor((i / target) * tiers.length))];
-    streets.push(generateStreet(rng, rhythm, tier));
+// In-memory cache keyed by city+precision (TTL: 1 hour)
+const cache = new Map<string, { ts: number; data: MapData }>();
+const CACHE_TTL_MS = 60 * 60 * 1000;
+
+export async function buildMap(
+  place: PlaceIdentity,
+  mood: VisualMood,
+  precision: Precision = "standard"
+): Promise<MapData> {
+  const cfg = PRECISION_CONFIG[precision];
+  const { lat, lng } = place.coordinates;
+
+  // Adjust longitude span for the latitude (Mercator-aware)
+  const lngFactor = 1 / Math.max(0.2, Math.cos((lat * Math.PI) / 180));
+  const halfLng = cfg.halfSpanDeg * lngFactor;
+  const halfLat = cfg.halfSpanDeg;
+
+  const bbox: [number, number, number, number] = [
+    lng - halfLng, lat - halfLat, lng + halfLng, lat + halfLat
+  ];
+
+  const cacheKey = `${place.city.toLowerCase()}|${precision}`;
+  const cached = cache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < CACHE_TTL_MS) {
+    return cached.data;
   }
 
-  // Optional water vein for coastal places
-  const coastalCities = new Set(["Lisbona", "Tropea", "Copenhagen", "Reykjavík"]);
-  const water = coastalCities.has(place.city) ? [generateWater(rng)] : undefined;
+  let data: MapData;
+  try {
+    const osm = await queryOverpass(bbox, cfg);
+    data = {
+      bbox,
+      zoom: cfg.zoom,
+      precision,
+      source: "osm",
+      streets: osm.streets,
+      water: osm.water,
+      waterways: osm.waterways
+    };
+  } catch (err) {
+    console.warn("[map-engine] Overpass failed, using procedural fallback:", err);
+    data = generateProceduralMap(bbox, cfg, precision, mood);
+  }
 
-  return {
-    bbox: [
-      place.coordinates.lng - 0.02,
-      place.coordinates.lat - 0.02,
-      place.coordinates.lng + 0.02,
-      place.coordinates.lat + 0.02
-    ],
-    zoom: density === "rarefatta" ? 13 : density === "densa" ? 15 : 14,
-    streets,
-    water
-  };
+  cache.set(cacheKey, { ts: Date.now(), data });
+  return data;
 }
 
-function generateStreet(rng: () => number, rhythm: VisualMood["rhythm"], tier: Street["type"]): Street {
-  const segments = tier === "primary" || tier === "secondary" ? 5 + Math.floor(rng() * 4) : 3 + Math.floor(rng() * 4);
+// ─── Overpass query ────────────────────────────────────────────────────────
+
+async function queryOverpass(
+  bbox: [number, number, number, number],
+  cfg: { halfSpanDeg: number; highways: string[]; zoom: number }
+): Promise<{ streets: Street[]; water: Polygon[]; waterways: Street[] }> {
+  const [minLng, minLat, maxLng, maxLat] = bbox;
+  const bboxStr = `${minLat},${minLng},${maxLat},${maxLng}`;
+  const highwayRegex = `^(${cfg.highways.join("|")})$`;
+
+  const q = `
+[out:json][timeout:15];
+(
+  way["highway"~"${highwayRegex}"](${bboxStr});
+  way["natural"="water"](${bboxStr});
+  way["waterway"~"^(river|canal|stream)$"](${bboxStr});
+  relation["natural"="water"](${bboxStr});
+);
+out geom;
+`.trim();
+
+  // Try endpoints in order
+  let lastErr: any;
+  for (const url of OVERPASS_ENDPOINTS) {
+    try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), OVERPASS_TIMEOUT_MS);
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: "data=" + encodeURIComponent(q),
+        signal: ctrl.signal
+      });
+      clearTimeout(t);
+      if (!res.ok) throw new Error(`Overpass HTTP ${res.status}`);
+      const json: any = await res.json();
+      return parseOverpass(json);
+    } catch (err) {
+      lastErr = err;
+      // try next endpoint
+    }
+  }
+  throw lastErr;
+}
+
+function parseOverpass(json: any): { streets: Street[]; water: Polygon[]; waterways: Street[] } {
+  const streets: Street[] = [];
+  const water: Polygon[] = [];
+  const waterways: Street[] = [];
+
+  const elements = Array.isArray(json.elements) ? json.elements : [];
+
+  for (const el of elements) {
+    if (el.type === "way" && Array.isArray(el.geometry)) {
+      const coords: Array<[number, number]> = el.geometry.map((g: any) => [g.lon, g.lat]);
+      const tags = el.tags ?? {};
+      if (tags.highway) {
+        streets.push({ type: mapHighwayToTier(tags.highway), coords });
+      } else if (tags.waterway && ["river", "canal", "stream"].includes(tags.waterway)) {
+        waterways.push({ type: "primary", coords });
+      } else if (tags.natural === "water") {
+        water.push({ coords });
+      }
+    } else if (el.type === "relation" && Array.isArray(el.members)) {
+      // Multipolygon water (e.g. coastline-bounded sea)
+      for (const m of el.members) {
+        if (m.role === "outer" && Array.isArray(m.geometry)) {
+          const coords: Array<[number, number]> = m.geometry.map((g: any) => [g.lon, g.lat]);
+          water.push({ coords });
+        }
+      }
+    }
+  }
+
+  return { streets, water, waterways };
+}
+
+function mapHighwayToTier(highway: string): Street["type"] {
+  if (["motorway", "trunk", "primary"].includes(highway)) return "primary";
+  if (highway === "secondary") return "secondary";
+  if (highway === "tertiary") return "tertiary";
+  if (["motorway_link", "trunk_link", "primary_link", "secondary_link", "tertiary_link"].includes(highway)) return "secondary";
+  if (["pedestrian", "footway", "path"].includes(highway)) return "pedestrian";
+  return "residential";
+}
+
+// ─── Procedural fallback (when Overpass is unreachable) ───────────────────
+
+function generateProceduralMap(
+  bbox: [number, number, number, number],
+  cfg: { halfSpanDeg: number; highways: string[]; zoom: number },
+  precision: Precision,
+  mood: VisualMood
+): MapData {
+  const seed = Math.floor((bbox[0] + 180) * 1000 + (bbox[1] + 90) * 1000);
+  const rng = mulberry32(seed);
+  const target = mood.density === "rarefatta" ? 16 : mood.density === "densa" ? 50 : 30;
+  const streets: Street[] = [];
+  const tiers: Street["type"][] = ["primary", "secondary", "tertiary", "residential"];
+  for (let i = 0; i < target; i++) {
+    const tier = tiers[Math.min(tiers.length - 1, Math.floor((i / target) * tiers.length))];
+    streets.push(generateStreet(rng, bbox, tier));
+  }
+  const waterways: Street[] = [generateRiverProcedural(rng, bbox)];
+  return { bbox, zoom: cfg.zoom, precision, source: "procedural", streets, water: [], waterways };
+}
+
+function generateStreet(rng: () => number, bbox: [number, number, number, number], tier: Street["type"]): Street {
+  const segments = tier === "primary" || tier === "secondary" ? 6 : 4;
   const coords: Array<[number, number]> = [];
-  let x = rng();
-  let y = rng();
+  let lng = bbox[0] + rng() * (bbox[2] - bbox[0]);
+  let lat = bbox[1] + rng() * (bbox[3] - bbox[1]);
   let angle = rng() * Math.PI * 2;
-  coords.push([x, y]);
+  coords.push([lng, lat]);
   for (let i = 0; i < segments; i++) {
-    const len = 0.06 + rng() * 0.18;
-    const wobble = rhythm === "fluido" ? (rng() - 0.5) * 0.9 : rhythm === "spezzato" ? (rng() - 0.5) * 1.6 : (rng() - 0.5) * 0.25;
-    angle += wobble;
-    x += Math.cos(angle) * len;
-    y += Math.sin(angle) * len;
-    coords.push([Math.max(0, Math.min(1, x)), Math.max(0, Math.min(1, y))]);
+    const len = ((bbox[2] - bbox[0]) * (0.08 + rng() * 0.2));
+    angle += (rng() - 0.5) * 0.6;
+    lng += Math.cos(angle) * len;
+    lat += Math.sin(angle) * len * 0.7;
+    coords.push([Math.max(bbox[0], Math.min(bbox[2], lng)), Math.max(bbox[1], Math.min(bbox[3], lat))]);
   }
   return { type: tier, coords };
 }
 
-function generateWater(rng: () => number) {
+function generateRiverProcedural(rng: () => number, bbox: [number, number, number, number]): Street {
   const coords: Array<[number, number]> = [];
-  const baseY = 0.78 + rng() * 0.12;
-  for (let x = 0; x <= 1.001; x += 0.05) {
-    coords.push([x, baseY + (rng() - 0.5) * 0.06]);
+  const baseLat = bbox[1] + (bbox[3] - bbox[1]) * (0.4 + (rng() - 0.5) * 0.3);
+  const steps = 12;
+  for (let i = 0; i <= steps; i++) {
+    const lng = bbox[0] - (bbox[2] - bbox[0]) * 0.15 + (i / steps) * (bbox[2] - bbox[0]) * 1.3;
+    const lat = baseLat + (rng() - 0.5) * (bbox[3] - bbox[1]) * 0.15;
+    coords.push([lng, lat]);
   }
-  coords.push([1, 1], [0, 1]);
-  return { coords };
+  return { type: "primary", coords };
 }
 
 function mulberry32(a: number) {

@@ -6,9 +6,9 @@ import { useEffect, useState } from "react";
 const STEPS = [
   "Stiamo leggendo i colori del tuo viaggio…",
   "Analizziamo il ritmo visivo del luogo…",
-  "Cerchiamo le coordinate dello sguardo…",
+  "Recuperiamo le strade reali da OpenStreetMap…",
   "La città sta prendendo forma…",
-  "Componiamo la mappa del modo in cui l’hai vissuta…"
+  "Componiamo la mappa del modo in cui l'hai vissuta…"
 ];
 
 export default function AnalyzePage() {
@@ -21,22 +21,25 @@ export default function AnalyzePage() {
     (async () => {
       const meta = JSON.parse(sessionStorage.getItem("eim:files") || "[]");
       const place = sessionStorage.getItem("eim:place") || "";
+      const precision = sessionStorage.getItem("eim:precision") || "standard";
       if (!Array.isArray(meta) || meta.length < 3 || place.length === 0) {
         router.replace("/upload");
         return;
       }
-      // Slow, contemplative pacing — the experience is part of the product.
+      // Fire the request immediately so Overpass can warm up; pace the UX
+      // separately so the request and the choreography overlap.
+      const reqPromise = fetch("/api/interpret", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ files: meta, place, precision })
+      }).then((r) => r.json());
+
       for (let i = 0; i < STEPS.length; i++) {
         if (cancelled) return;
         setStep(i);
         await new Promise((r) => setTimeout(r, 1100));
       }
-      const res = await fetch("/api/interpret", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ files: meta, place })
-      });
-      const data = await res.json();
+      const data = await reqPromise;
       if (cancelled) return;
       sessionStorage.setItem("eim:interpretation", JSON.stringify(data));
       router.replace("/result");

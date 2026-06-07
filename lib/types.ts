@@ -46,22 +46,26 @@ export interface VisualMood {
   atmosphere: AtmosphereWord[]; // 2–4 words, never more
 }
 
+export type Precision = "essenziale" | "standard" | "cartografica";
+
 export interface MapData {
-  bbox: [number, number, number, number]; // minLng, minLat, maxLng, maxLat
+  bbox: [number, number, number, number]; // [minLng, minLat, maxLng, maxLat]
   zoom: number;
+  precision: Precision;
+  source: "osm" | "procedural";
+  // Coordinates use [lng, lat] in geographic space (WGS84).
   streets: Street[];
-  water?: Polygon[];
-  green?: Polygon[];
-  blocks?: Polygon[];
+  water: Polygon[];           // areal water (lakes, sea)
+  waterways: Street[];        // linear water (rivers, canals)
 }
 
 export interface Street {
   type: "primary" | "secondary" | "tertiary" | "residential" | "pedestrian";
-  coords: Array<[number, number]>;
+  coords: Array<[number, number]>; // [lng, lat]
 }
 
 export interface Polygon {
-  coords: Array<[number, number]>;
+  coords: Array<[number, number]>; // [lng, lat]
 }
 
 export interface ArtDirection {
